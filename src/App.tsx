@@ -68,6 +68,14 @@ export default function App() {
         body: JSON.stringify({ productDescription })
       });
       
+      if (!response.ok) {
+        const errData = await response.json().catch(() => null);
+        console.error('API Error:', errData);
+        setPhase('idle');
+        alert(`API Error: ${errData?.error || response.statusText}`);
+        return;
+      }
+      
       if (!response.body) return;
       
       const reader = response.body.getReader();
@@ -97,13 +105,14 @@ export default function App() {
                     setAgents(agents => agents.map(a => a.id === data.agent ? { ...a, status: 'done' } : a));
                   } else if (eventName === 'demand') {
                     setDemandThreads(prev => [...prev, data]);
+                  } else if (eventName === 'drafts') {
+                    setLaunchpadItems(prev => {
+                      const exists = prev.find(p => p.id === data.id);
+                      if (exists) return prev.map(p => p.id === data.id ? data : p);
+                      return [...prev, data];
+                    });
                   } else if (eventName === 'done') {
                     setPhase('drafting');
-                    // Simulate launchpad items being ready
-                    setLaunchpadItems([
-                      { id: '1', platform: 'Reddit', content: `Hey r/SaaS, I just built LaunchAgent for this: ${productDescription}. We use 12 parallel agents to scrape demand. Check it out!`, url: '#' },
-                      { id: '2', platform: 'X', content: `Building is solved. Distribution is not. Meet LaunchAgent: 12 parallel agents finding where your users are already complaining about the problem you solve. \n\n#buildinpublic`, url: '#' }
-                    ]);
                   }
                 } catch (e) {
                   console.error('Error parsing SSE data', e);
@@ -113,8 +122,10 @@ export default function App() {
           }
         }
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error('Error in launch', e);
+      setPhase('idle');
+      alert(`Connection failed: ${e.message}`);
     }
   }
 
@@ -122,6 +133,29 @@ export default function App() {
     navigator.clipboard.writeText(content)
     setCopiedId(id)
     setTimeout(() => setCopiedId(null), 2000)
+  }
+
+  const handleLaunchPlatform = async (item: LaunchpadItem) => {
+    if (item.platform === 'Image') {
+      window.open(item.content, '_blank');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(item.content);
+      setCopiedId(item.id);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch (e) {
+      console.warn("Clipboard failed", e);
+    }
+
+    let targetUrl = item.url;
+    if (!targetUrl || targetUrl === '#') {
+      if (item.platform.includes('Reddit')) targetUrl = `https://www.reddit.com/submit?text=${encodeURIComponent(item.content)}`;
+      else if (item.platform.includes('X')) targetUrl = `https://twitter.com/intent/tweet?text=${encodeURIComponent(item.content)}`;
+      else if (item.platform.includes('LinkedIn')) targetUrl = `https://www.linkedin.com/sharing/share-offsite/`;
+      else targetUrl = `https://news.ycombinator.com/submit`;
+    }
+    window.open(targetUrl, '_blank');
   }
 
   const renderStatusIcon = (status: AgentStatus) => {
@@ -307,21 +341,37 @@ export default function App() {
                             <div className="flex items-center justify-between">
                               <h3 className="text-sm font-medium text-white">{item.platform} Post</h3>
                             </div>
-                            <Textarea 
-                              defaultValue={item.content}
-                              className="bg-black/50 border-white/10 focus-visible:ring-[#00FF88] text-sm text-white min-h-[100px]"
-                            />
+                            
+                            {item.platform === 'Image' ? (
+                              <img src={item.content} alt="Generated social card" className="w-full h-auto rounded-lg border border-white/10" />
+                            ) : (
+                              <Textarea 
+                                defaultValue={item.content}
+                                className="bg-black/50 border-white/10 focus-visible:ring-[#00FF88] text-sm text-white min-h-[100px]"
+                              />
+                            )}
+
                             <div className="flex gap-3">
-                              <Button className="flex-1 bg-[#00FF88] text-black hover:bg-[#00FF88]/90 font-medium">
-                                Launch on {item.platform} <Rocket className="w-4 h-4 ml-2" />
-                              </Button>
                               <Button 
-                                variant="outline" 
-                                onClick={() => handleCopy(item.id, item.content)}
-                                className="border-white/20 text-white hover:bg-white/10"
+                                onClick={() => handleLaunchPlatform(item)}
+                                className="flex-1 bg-[#00FF88] text-black hover:bg-[#00FF88]/90 font-medium"
                               >
-                                {copiedId === item.id ? <Check className="w-4 h-4 text-[#00FF88]" /> : <Copy className="w-4 h-4" />}
+                                {item.platform === 'Image' ? 'Download Image' : `Launch on ${item.platform}`} <Rocket className="w-4 h-4 ml-2" />
                               </Button>
+                              
+                              {item.platform !== 'Image' && (
+                                <Button 
+                                  variant="outline" 
+                                  onClick={() => {
+                                    navigator.clipboard.writeText(item.content);
+                                    setCopiedId(item.id);
+                                    setTimeout(() => setCopiedId(null), 2000);
+                                  }}
+                                  className="border-white/20 text-white hover:bg-white/10"
+                                >
+                                  {copiedId === item.id ? <Check className="w-4 h-4 text-[#00FF88]" /> : <Copy className="w-4 h-4" />}
+                                </Button>
+                              )}
                             </div>
                           </div>
                         ))

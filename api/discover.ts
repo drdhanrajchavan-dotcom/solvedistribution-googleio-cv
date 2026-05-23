@@ -51,6 +51,8 @@ export default async function handler(req: any, res: any) {
     }
   ];
 
+  let allThreads: any[] = [];
+
   const fetchAgent = async (agent: typeof agents[0]) => {
     sendEvent('agent_start', { agent: agent.id });
     try {
@@ -94,6 +96,9 @@ export default async function handler(req: any, res: any) {
       }
 
       if (parsed && parsed.threads) {
+        // Collect for drafting
+        allThreads.push(...parsed.threads.map((t: any) => ({ ...t, platform: parsed.platform || agent.id })));
+        
         for (const thread of parsed.threads) {
           // Map to uniform UI format
           sendEvent('demand', {
@@ -113,15 +118,74 @@ export default async function handler(req: any, res: any) {
   };
 
   try {
-    // Fire all 5 sandboxes concurrently
-    await Promise.all(agents.map(fetchAgent));
+    // Run agents sequentially to avoid 429 Too Many Requests on free tier
+    for (const agent of agents) {
+      await fetchAgent(agent);
+    }
 
     sendEvent('status', { message: 'Discovery complete. Orchestrating strategy...' });
     
-    // Simulate Strategy and Content generation (can be replaced with regular generateContent later)
     sendEvent('agent_start', { agent: 'strat' });
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, 1000));
     sendEvent('agent_done', { agent: 'strat' });
+
+    sendEvent('status', { message: 'Drafting contextual content...' });
+
+    const redditThread = allThreads.find(t => String(t.platform).toLowerCase().includes('reddit'));
+    const hnThread = allThreads.find(t => String(t.platform).toLowerCase().includes('hacker'));
+    const generalThread = allThreads.find(t => !String(t.platform).toLowerCase().includes('reddit') && !String(t.platform).toLowerCase().includes('hacker')) || allThreads[0];
+
+    const draftContent = async (platformName: string, agentId: string, threadContext: any) => {
+      sendEvent('agent_start', { agent: agentId });
+      try {
+        const prompt = `You are a native ${platformName} developer writing a post that does NOT sound like marketing.
+PRODUCT: ${productDescription}
+TARGET_THREAD: ${JSON.stringify(threadContext || {})}
+TASK: Write a short, technical reply or post mentioning the product as a specific solution to the user's problem. Cite their vocabulary from the TARGET_THREAD. No marketing jargon. Return ONLY the text of the post. Limit to 100 words.`;
+        
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+        });
+        const data = await response.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || `Draft failed for ${platformName}`;
+        
+        let targetUrl = '#';
+        if (threadContext) {
+          targetUrl = threadContext.url || threadContext.thread_url || threadContext.story_url || threadContext.html_url || threadContext.link || '#';
+        }
+        
+        sendEvent('drafts', {
+          id: agentId,
+          platform: platformName,
+          content: text,
+          url: targetUrl
+        });
+      } catch (e) {
+        console.error(`Drafting failed for ${platformName}`, e);
+      }
+      sendEvent('agent_done', { agent: agentId });
+    };
+
+    // Run writers in parallel since standard API is less strict on rate limits than Interactions
+    await Promise.all([
+      draftContent('Reddit', 'w_reddit', redditThread),
+      draftContent('Hacker News', 'w_hn', hnThread),
+      draftContent('X', 'w_x', generalThread),
+      draftContent('LinkedIn', 'w_li', generalThread)
+    ]);
+
+    // Generate placeholder image
+    sendEvent('agent_start', { agent: 'w_img' });
+    await new Promise(r => setTimeout(r, 1000));
+    sendEvent('drafts', {
+      id: 'w_img',
+      platform: 'Image',
+      content: `https://placehold.co/600x400/1e1e1e/00ff88?text=${encodeURIComponent(productDescription.substring(0,30))}`,
+      url: '#'
+    });
+    sendEvent('agent_done', { agent: 'w_img' });
 
     sendEvent('done', { status: 'complete' });
   } catch (error: any) {
