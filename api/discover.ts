@@ -1,3 +1,5 @@
+import type { VercelRequest, VercelResponse } from '@vercel/node';
+
 export default async function handler(req: any, res: any) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -10,7 +12,7 @@ export default async function handler(req: any, res: any) {
 
   const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
   if (!GEMINI_API_KEY) {
-    return res.status(500).json({ error: 'GEMINI_API_KEY is missing in environment variables' });
+    return res.status(500).json({ error: 'GEMINI_API_KEY is missing' });
   }
 
   // Set up Server-Sent Events headers
@@ -18,63 +20,107 @@ export default async function handler(req: any, res: any) {
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
 
-  // Helper to send SSE events
   const sendEvent = (type: string, data: any) => {
     res.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
     (res as any).flush?.();
   };
 
-  sendEvent('status', { message: 'Initializing persistent environment...' });
+  sendEvent('status', { message: 'Initializing 5 parallel sandboxes...' });
+
+  // Define prompts based on original project plan
+  const agents = [
+    {
+      id: 'reddit',
+      prompt: `You are a demand intelligence agent specialized in Reddit. PRODUCT: ${productDescription}. TASK: Find 5-10 Reddit threads from the last 180 days where people need this product. Query Reddit's public JSON search. Extract thread_url, subreddit, title, body_snippet, num_comments, score, verbatim_phrases. Return JSON object {"platform": "reddit", "threads": [...]}. Stop after 10 results or 60s. Return JSON only, no preamble.`
+    },
+    {
+      id: 'hn',
+      prompt: `You are a demand intelligence agent specialized in Hacker News. PRODUCT: ${productDescription}. TASK: Find 5-10 HN stories/comments where people need this product. Query hn.algolia.com/api/v1/search?query=QUERY&tags=story. Extract story_url (use objectID), title, points, num_comments, verbatim_phrases. Return JSON: {"platform": "hackernews", "threads": [...]}. Stop after 10 results or 60s. JSON only.`
+    },
+    {
+      id: 'github',
+      prompt: `You are a demand intelligence agent specialized in GitHub. PRODUCT: ${productDescription}. TASK: Find 5 open GitHub issues where people need this product. Query api.github.com/search/issues. Extract html_url, title, body_snippet, reactions_total, verbatim_phrases. Return JSON: {"platform": "github", "threads": [...]}. Stop after 10 results or 60s. JSON only.`
+    },
+    {
+      id: 'devto',
+      prompt: `You are a demand intelligence agent specialized in Dev.to. PRODUCT: ${productDescription}. TASK: Find 5 Dev.to articles where developers need this product. Query dev.to/api/articles. Extract url, title, body_snippet, public_reactions_count, verbatim_phrases. Return JSON: {"platform": "devto", "threads": [...]}. Stop after 10 results or 60s. JSON only.`
+    },
+    {
+      id: 'so',
+      prompt: `You are a demand intelligence agent specialized in Stack Overflow. PRODUCT: ${productDescription}. TASK: Find 5 Stack Overflow questions needing this product. Query api.stackexchange.com/2.3/search/advanced. Extract link, title, score, answer_count, verbatim_phrases. Return JSON: {"platform": "stackoverflow", "threads": [...]}. Stop after 10 results or 60s. JSON only.`
+    }
+  ];
+
+  const fetchAgent = async (agent: typeof agents[0]) => {
+    sendEvent('agent_start', { agent: agent.id });
+    try {
+      const response = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': GEMINI_API_KEY,
+          'Api-Revision': '2026-05-20'
+        },
+        body: JSON.stringify({
+          agent: 'antigravity-preview-05-2026',
+          input: agent.prompt,
+          environment: { type: 'remote' }
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`API returned ${response.status}`);
+      }
+
+      const data = await response.json();
+      
+      // Parse output
+      let textOutput = '';
+      if (data.steps) {
+        const modelSteps = data.steps.filter((s: any) => s.type === 'model_output');
+        if (modelSteps.length > 0) {
+          const lastOutput = modelSteps[modelSteps.length - 1];
+          textOutput = lastOutput.content?.map((c: any) => c.text).join(' ') || '';
+        }
+      }
+
+      // Extract JSON from markdown if necessary
+      const jsonMatch = textOutput.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+      let parsed = null;
+      try {
+        parsed = JSON.parse(jsonMatch ? jsonMatch[1] : textOutput);
+      } catch (e) {
+        console.error('Failed to parse agent JSON:', textOutput);
+      }
+
+      if (parsed && parsed.threads) {
+        for (const thread of parsed.threads) {
+          // Map to uniform UI format
+          sendEvent('demand', {
+            id: Math.random().toString(36).substring(7),
+            platform: parsed.platform || agent.id,
+            title: thread.title || 'Untitled',
+            snippet: thread.body_snippet || thread.verbatim_phrases?.[0] || '...',
+            engagement: thread.score || thread.points || thread.public_reactions_count || thread.reactions_total || 0,
+            url: thread.thread_url || thread.story_url || thread.html_url || thread.url || thread.link || '#'
+          });
+        }
+      }
+    } catch (e: any) {
+      console.error(`Agent ${agent.id} failed:`, e);
+    }
+    sendEvent('agent_done', { agent: agent.id });
+  };
 
   try {
-    // 1. Create a persistent environment by making an initial dummy interaction
-    // We upload the AGENTS.md content as part of the initial prompt so it can be written to the workspace.
-    // In a full implementation, we'd use the Files API to upload and mount it, but for simplicity here we pass it.
+    // Fire all 5 sandboxes concurrently
+    await Promise.all(agents.map(fetchAgent));
+
+    sendEvent('status', { message: 'Discovery complete. Orchestrating strategy...' });
     
-    // For this hackathon stub, we simulate the environment creation and the parallel agent runs,
-    // since we don't have the real API key and standard environment sharing details yet.
-    
-    sendEvent('status', { message: 'Environment created. Spawning parallel discovery agents...' });
-    
-    // Simulate delays and stream partial results
-    await new Promise(r => setTimeout(r, 2000));
-    sendEvent('agent_start', { agent: 'reddit' });
-    sendEvent('agent_start', { agent: 'hn' });
-    sendEvent('agent_start', { agent: 'github' });
-    sendEvent('agent_start', { agent: 'devto' });
-    sendEvent('agent_start', { agent: 'so' });
-
-    await new Promise(r => setTimeout(r, 2500));
-    sendEvent('demand', {
-      id: 'r_1',
-      platform: 'Reddit',
-      title: `Need a tool to find where my users are: ${productDescription.substring(0, 20)}...`,
-      snippet: 'I have built a cool tool but I have no idea where to post about it...',
-      engagement: 342,
-      url: 'https://reddit.com/r/SaaS'
-    });
-    sendEvent('agent_done', { agent: 'reddit' });
-
-    await new Promise(r => setTimeout(r, 1500));
-    sendEvent('demand', {
-      id: 'hn_1',
-      platform: 'Hacker News',
-      title: `Ask HN: How do you distribute developer tools?`,
-      snippet: 'I usually post to Show HN, but the lifespan of the post is short...',
-      engagement: 890,
-      url: 'https://news.ycombinator.com/ask'
-    });
-    sendEvent('agent_done', { agent: 'hn' });
-
-    await new Promise(r => setTimeout(r, 1000));
-    sendEvent('agent_done', { agent: 'github' });
-    sendEvent('agent_done', { agent: 'devto' });
-    sendEvent('agent_done', { agent: 'so' });
-
-    sendEvent('status', { message: 'Discovery complete. Starting Strategy agent...' });
+    // Simulate Strategy and Content generation (can be replaced with regular generateContent later)
     sendEvent('agent_start', { agent: 'strat' });
-
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 2000));
     sendEvent('agent_done', { agent: 'strat' });
 
     sendEvent('done', { status: 'complete' });
