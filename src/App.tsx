@@ -7,7 +7,7 @@ import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Textarea } from '@/components/ui/textarea'
-import { Rocket, Play, CheckCircle2, Circle, Loader2, Sparkles, Map, Route, PenTool } from 'lucide-react'
+import { Rocket, Play, CheckCircle2, Circle, Loader2, Sparkles, Map, Route, PenTool, Copy, Check } from 'lucide-react'
 
 type Phase = 'idle' | 'discovering' | 'strategy' | 'drafting' | 'done'
 type AgentStatus = 'idle' | 'running' | 'done' | 'skipped'
@@ -18,9 +18,28 @@ interface AgentTrace {
   status: AgentStatus
 }
 
+interface DemandThread {
+  id: string
+  platform: string
+  title: string
+  snippet: string
+  engagement: number
+  url: string
+}
+
+interface LaunchpadItem {
+  id: string
+  platform: string
+  content: string
+  url: string
+}
+
 export default function App() {
   const [productDescription, setProductDescription] = useState('')
   const [phase, setPhase] = useState<Phase>('idle')
+  const [demandThreads, setDemandThreads] = useState<DemandThread[]>([])
+  const [launchpadItems, setLaunchpadItems] = useState<LaunchpadItem[]>([])
+  const [copiedId, setCopiedId] = useState<string | null>(null)
   
   const [agents, setAgents] = useState<AgentTrace[]>([
     { id: 'reddit', name: 'Reddit Discovery', status: 'idle' },
@@ -37,16 +56,72 @@ export default function App() {
     { id: 'w_img', name: 'Image Generator', status: 'idle' }
   ])
 
-  const handleLaunch = () => {
+  const handleLaunch = async () => {
     if (!productDescription) return
     setPhase('discovering')
-    // In a real implementation, we would start SSE fetching here
-    // For the UI stub, we'll just simulate the first agents running
-    setAgents(agents.map(a => 
-      ['reddit', 'hn', 'github', 'devto', 'so'].includes(a.id) 
-        ? { ...a, status: 'running' } 
-        : a
-    ))
+    setDemandThreads([])
+    
+    try {
+      const response = await fetch('/api/discover', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ productDescription })
+      });
+      
+      if (!response.body) return;
+      
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+        
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].startsWith('event: ')) {
+            const eventName = lines[i].replace('event: ', '').trim();
+            const dataLine = lines[i + 1];
+            if (dataLine && dataLine.startsWith('data: ')) {
+              const dataStr = dataLine.replace('data: ', '').trim();
+              if (dataStr) {
+                try {
+                  const data = JSON.parse(dataStr);
+                  
+                  if (eventName === 'agent_start') {
+                    setAgents(agents => agents.map(a => a.id === data.agent ? { ...a, status: 'running' } : a));
+                    if (data.agent === 'strat') setPhase('strategy');
+                  } else if (eventName === 'agent_done') {
+                    setAgents(agents => agents.map(a => a.id === data.agent ? { ...a, status: 'done' } : a));
+                  } else if (eventName === 'demand') {
+                    setDemandThreads(prev => [...prev, data]);
+                  } else if (eventName === 'done') {
+                    setPhase('drafting');
+                    // Simulate launchpad items being ready
+                    setLaunchpadItems([
+                      { id: '1', platform: 'Reddit', content: `Hey r/SaaS, I just built LaunchAgent for this: ${productDescription}. We use 12 parallel agents to scrape demand. Check it out!`, url: '#' },
+                      { id: '2', platform: 'X', content: `Building is solved. Distribution is not. Meet LaunchAgent: 12 parallel agents finding where your users are already complaining about the problem you solve. \n\n#buildinpublic`, url: '#' }
+                    ]);
+                  }
+                } catch (e) {
+                  console.error('Error parsing SSE data', e);
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Error in launch', e);
+    }
+  }
+
+  const handleCopy = (id: string, content: string) => {
+    navigator.clipboard.writeText(content)
+    setCopiedId(id)
+    setTimeout(() => setCopiedId(null), 2000)
   }
 
   const renderStatusIcon = (status: AgentStatus) => {
@@ -185,7 +260,27 @@ export default function App() {
 
                   <ScrollArea className="flex-1 p-6">
                     <TabsContent value="demand" className="mt-0 space-y-4">
-                      {phase === 'discovering' ? (
+                      {demandThreads.length > 0 ? (
+                        <div className="space-y-4">
+                          {demandThreads.map(thread => (
+                            <motion.div key={thread.id} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 rounded-lg bg-white/5 border border-white/10 hover:border-[#00FF88]/50 transition-colors">
+                              <div className="flex justify-between items-start mb-2">
+                                <Badge variant="outline" className="bg-black/50 text-xs border-white/10">{thread.platform}</Badge>
+                                <span className="text-xs text-[#00FF88] font-mono">{thread.engagement} engagements</span>
+                              </div>
+                              <h3 className="text-sm font-semibold text-white mb-1">{thread.title}</h3>
+                              <p className="text-xs text-muted-foreground line-clamp-2 mb-3">{thread.snippet}</p>
+                              <a href={thread.url} className="text-xs text-[#00FF88] hover:underline inline-flex items-center">View source ↗</a>
+                            </motion.div>
+                          ))}
+                          {phase === 'discovering' && (
+                            <div className="flex items-center justify-center py-4 text-muted-foreground space-x-3">
+                              <Loader2 className="w-4 h-4 animate-spin text-[#00FF88]/50" />
+                              <span className="text-sm">Agents still scanning...</span>
+                            </div>
+                          )}
+                        </div>
+                      ) : phase === 'discovering' ? (
                         <div className="flex flex-col items-center justify-center h-64 text-muted-foreground space-y-4">
                           <Loader2 className="w-8 h-8 animate-spin text-[#00FF88]/50" />
                           <p>Agents are scanning Reddit, HackerNews, Dev.to...</p>
@@ -196,11 +291,43 @@ export default function App() {
                     </TabsContent>
 
                     <TabsContent value="strategy" className="mt-0">
-                      <div className="text-muted-foreground text-center py-12">Strategy recommendations will appear here.</div>
+                      {phase === 'strategy' || phase === 'drafting' || phase === 'done' ? (
+                        <div className="flex items-center justify-center h-64 text-[#00FF88]">
+                          Strategy forming based on {demandThreads.length} signals...
+                        </div>
+                      ) : (
+                        <div className="text-muted-foreground text-center py-12">Strategy recommendations will appear here.</div>
+                      )}
                     </TabsContent>
 
-                    <TabsContent value="launchpad" className="mt-0">
-                      <div className="text-muted-foreground text-center py-12">Drafted posts and launch buttons will appear here.</div>
+                    <TabsContent value="launchpad" className="mt-0 space-y-6">
+                      {launchpadItems.length > 0 ? (
+                        launchpadItems.map(item => (
+                          <div key={item.id} className="p-5 rounded-xl bg-white/5 border border-white/10 space-y-4">
+                            <div className="flex items-center justify-between">
+                              <h3 className="text-sm font-medium text-white">{item.platform} Post</h3>
+                            </div>
+                            <Textarea 
+                              defaultValue={item.content}
+                              className="bg-black/50 border-white/10 focus-visible:ring-[#00FF88] text-sm text-white min-h-[100px]"
+                            />
+                            <div className="flex gap-3">
+                              <Button className="flex-1 bg-[#00FF88] text-black hover:bg-[#00FF88]/90 font-medium">
+                                Launch on {item.platform} <Rocket className="w-4 h-4 ml-2" />
+                              </Button>
+                              <Button 
+                                variant="outline" 
+                                onClick={() => handleCopy(item.id, item.content)}
+                                className="border-white/20 text-white hover:bg-white/10"
+                              >
+                                {copiedId === item.id ? <Check className="w-4 h-4 text-[#00FF88]" /> : <Copy className="w-4 h-4" />}
+                              </Button>
+                            </div>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="text-muted-foreground text-center py-12">Drafted posts and launch buttons will appear here.</div>
+                      )}
                     </TabsContent>
                   </ScrollArea>
                 </Tabs>
